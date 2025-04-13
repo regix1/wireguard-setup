@@ -1,0 +1,43 @@
+#!/bin/bash
+
+# WireGuard Rules Manager with Optimized Chain Handling
+
+LOCK_FILE="/var/run/wg-rules.lock"
+
+# Check if rules already applied
+if [ -f "$LOCK_FILE" ]; then
+  echo "Rules already applied. Using existing configuration."
+  echo "To force reapply, run: rm $LOCK_FILE && ./wg-rules.sh"
+  exit 0
+fi
+
+# Create lock file
+touch "$LOCK_FILE"
+
+# Add cleanup trap
+trap 'rm -f "$LOCK_FILE"; exit' INT TERM EXIT
+
+# Default policies
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT ACCEPT
+
+# Enable IP forwarding
+sysctl -w net.ipv4.conf.all.forwarding=1 >/dev/null
+
+# Optimize BANNED_IPS chain handling
+if ! iptables -S | grep -q "^-N BANNED_IPS"; then
+  echo "Creating BANNED_IPS chain..."
+  iptables -N BANNED_IPS
+fi
+
+# Make sure the references are in place
+iptables -D INPUT -j BANNED_IPS 2>/dev/null || true
+iptables -D FORWARD -j BANNED_IPS 2>/dev/null || true
+iptables -I INPUT 1 -j BANNED_IPS
+iptables -I FORWARD 1 -j BANNED_IPS
+
+echo "WireGuard firewall rules applied successfully."
+
+# Disable trap before exit to avoid double-logging
+trap - INT TERM EXIT

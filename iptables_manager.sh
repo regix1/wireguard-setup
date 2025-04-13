@@ -3,15 +3,11 @@
 # IP Ban Manager (IPv4 Only)
 # A lightweight tool for managing IPv4 bans via iptables
 #
-
-set -eo pipefail
-trap 'echo -e "\n\033[1;31m[ERROR] Script failed at line $LINENO\033[0m"; exit 1                                                                                                                                                                                                                                             ' ERR
+# Usage: sudo ./ipban.sh
 
 # Configuration
 BANNED_CHAIN="BANNED_IPS"
-LOG_FILE="/var/log/ipban.log"
-CONFIG_DIR="/etc/ipban"
-VERSION="1.0"
+VERSION="1.2"
 
 # Colors for output
 RED='\033[0;31m'
@@ -66,7 +62,7 @@ validate_ip() {
         ip=${ip%/*}
 
         # Validate CIDR
-        if ! [[ "$cidr" =~ ^[0-9]+$ ]] || [ "$cidr" -lt 0 ] || [ "$cidr" -gt 32                                                                                                                                                                                                                                              ]; then
+        if ! [[ "$cidr" =~ ^[0-9]+$ ]] || [ "$cidr" -lt 0 ] || [ "$cidr" -gt 32 ]; then
             log_error "Invalid CIDR notation: /$cidr (must be 0-32)"
             return 1
         fi
@@ -97,40 +93,7 @@ ensure_banned_chain() {
         iptables -N "$BANNED_CHAIN"
         iptables -I INPUT 1 -j "$BANNED_CHAIN"
         iptables -I FORWARD 1 -j "$BANNED_CHAIN"
-        log_info "$BANNED_CHAIN chain created and linked to INPUT and FORWARD ch                                                                                                                                                                                                                                             ains"
-    fi
-}
-
-# Create configuration directory if needed
-ensure_config_dir() {
-    if [[ ! -d "$CONFIG_DIR" ]]; then
-        log_info "Creating configuration directory: $CONFIG_DIR"
-        mkdir -p "$CONFIG_DIR"
-        touch "$CONFIG_DIR/banned_ips.conf"
-    fi
-}
-
-# Save iptables rules if iptables-persistent is installed
-save_rules() {
-    if dpkg -l iptables-persistent 2>/dev/null | grep -q "^ii"; then
-        log_info "Saving rules with iptables-persistent..."
-        netfilter-persistent save
-        log_info "Rules saved successfully"
-    else
-        log_warn "iptables-persistent not installed. Rules will be lost on reboo                                                                                                                                                                                                                                             t!"
-
-        if prompt_yes_no "Would you like to install iptables-persistent now?"; t                                                                                                                                                                                                                                             hen
-            log_info "Installing iptables-persistent..."
-            DEBIAN_FRONTEND=noninteractive apt-get update -qq
-            DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persisten                                                                                                                                                                                                                                             t
-
-            if [ $? -eq 0 ]; then
-                log_info "iptables-persistent installed successfully"
-                netfilter-persistent save
-            else
-                log_error "Failed to install iptables-persistent"
-            fi
-        fi
+        log_info "$BANNED_CHAIN chain created and linked to INPUT and FORWARD chains"
     fi
 }
 
@@ -140,13 +103,13 @@ ban_ip() {
     echo -e "${BOLD}${CYAN}=== Ban an IP Address ===${NC}\n"
 
     # Show current bans first
-    local current_bans=$(iptables -L "$BANNED_CHAIN" -n 2>/dev/null | grep DROP                                                                                                                                                                                                                                              | grep -E '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $4}' | sort | uniq)
+    local current_bans=$(iptables -L "$BANNED_CHAIN" -n 2>/dev/null | grep DROP | grep -E '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $4}' | sort | uniq)
 
     if [ -n "$current_bans" ]; then
         echo -e "${BOLD}${YELLOW}Currently Banned IPs:${NC}"
         echo -e "${YELLOW}------------------------------------------${NC}"
         while IFS= read -r ip; do
-            local comment=$(iptables -L "$BANNED_CHAIN" -n | grep "$ip" | grep -                                                                                                                                                                                                                                             o "\/\*.*\*\/" | sed 's/\/\*//;s/\*\///' | head -n 1)
+            local comment=$(iptables -L "$BANNED_CHAIN" -n | grep "$ip" | grep -o "\/\*.*\*\/" | sed 's/\/\*//;s/\*\///' | head -n 1)
             if [ -n "$comment" ]; then
                 echo -e "${RED}BANNED:${NC} $ip ${PURPLE}($comment)${NC}"
             else
@@ -157,7 +120,7 @@ ban_ip() {
     fi
 
     while true; do
-        echo -e "${YELLOW}Enter the IP address or CIDR range to ban (or 'q' to r                                                                                                                                                                                                                                             eturn to menu):${NC}"
+        echo -e "${YELLOW}Enter the IP address or CIDR range to ban (or 'q' to return to menu):${NC}"
         read -r ip_to_ban
 
         # Allow returning to menu
@@ -167,7 +130,7 @@ ban_ip() {
 
         # Check for empty input
         if [[ -z "$ip_to_ban" ]]; then
-            log_error "IP address cannot be empty. Please try again or enter 'q'                                                                                                                                                                                                                                              to cancel."
+            log_error "IP address cannot be empty. Please try again or enter 'q' to cancel."
             continue
         fi
 
@@ -180,31 +143,56 @@ ban_ip() {
         break
     done
 
-    # Get optional comment
-    echo -e "\n${YELLOW}Enter a reason for this ban (optional):${NC}"
-    read -r ban_reason
-
     ensure_banned_chain
 
-    log_info "Adding ban for $ip_to_ban to IPTables..."
-
     # Check if this IP already has a ban rule
-    if iptables -C "$BANNED_CHAIN" -s "$ip_to_ban" -j DROP 2>/dev/null; then
+    if echo "$current_bans" | grep -q "$ip_to_ban"; then
         log_warn "IP $ip_to_ban is already banned"
+
+        # Get current comment if any
+        current_comment=$(iptables -L "$BANNED_CHAIN" -n | grep "$ip_to_ban" | grep -o "\/\*.*\*\/" | sed 's/\/\*//;s/\*\///' | head -n 1)
+        if [[ -n "$current_comment" ]]; then
+            log_info "Current ban reason: $current_comment"
+        fi
+
+        # Ask if user wants to change the comment
+        if prompt_yes_no "Do you want to change the ban reason?" "n"; then
+            # Get new comment
+            echo -e "\n${YELLOW}Enter new reason for this ban:${NC}"
+            read -r new_ban_reason
+
+            # Find and remove rules for the IP
+            rule_nums=$(iptables -L "$BANNED_CHAIN" --line-numbers -n | grep "$ip_to_ban" | grep "DROP" | awk '{print $1}' | sort -nr)
+            if [ -n "$rule_nums" ]; then
+                while IFS= read -r num; do
+                    iptables -D "$BANNED_CHAIN" "$num"
+                done <<< "$rule_nums"
+            fi
+
+            # Add new rule with updated comment
+            if [[ -n "$new_ban_reason" ]]; then
+                iptables -A "$BANNED_CHAIN" -s "$ip_to_ban" -m comment --comment "$new_ban_reason" -j DROP
+                log_info "Updated ban reason for IP: $ip_to_ban"
+            else
+                iptables -A "$BANNED_CHAIN" -s "$ip_to_ban" -j DROP
+                log_info "Removed ban reason for IP: $ip_to_ban"
+            fi
+        fi
     else
+        # Get optional comment
+        echo -e "\n${YELLOW}Enter a reason for this ban (optional):${NC}"
+        read -r ban_reason
+
+        log_info "Adding ban for $ip_to_ban to IPTables..."
+
         # Add ban rule to BANNED_IPS chain
         if [[ -n "$ban_reason" ]]; then
-            iptables -A "$BANNED_CHAIN" -s "$ip_to_ban" -m comment --comment "$b                                                                                                                                                                                                                                             an_reason" -j DROP
-            echo "$ip_to_ban # $ban_reason" >> "$CONFIG_DIR/banned_ips.conf"
+            iptables -A "$BANNED_CHAIN" -s "$ip_to_ban" -m comment --comment "$ban_reason" -j DROP
         else
             iptables -A "$BANNED_CHAIN" -s "$ip_to_ban" -j DROP
-            echo "$ip_to_ban" >> "$CONFIG_DIR/banned_ips.conf"
         fi
         log_info "Added ban for IP: $ip_to_ban"
     fi
-
-    # Save rules
-    save_rules
 
     display_footer
 }
@@ -225,7 +213,7 @@ list_bans() {
 
         while IFS= read -r line; do
             local ip=$(echo "$line" | awk '{print $4}')
-            local comment=$(echo "$line" | grep -o "\/\*.*\*\/" | sed 's/\/\*//;                                                                                                                                                                                                                                             s/\*\///')
+            local comment=$(echo "$line" | grep -o "\/\*.*\*\/" | sed 's/\/\*//;s/\*\///')
 
             if [ -n "$comment" ]; then
                 echo -e "${RED}BANNED:${NC} $ip ${PURPLE}($comment)${NC}"
@@ -265,44 +253,11 @@ debug_banned_ips() {
     echo -e "${YELLOW}------------------------------------------${NC}"
 
     # Add table header with column descriptions
-    echo -e "${CYAN}Rule#  Packets  Bytes  Action  Proto  Opt  In  Out  Source I                                                                                                                                                                                                                                             P          Destination     Comments${NC}"
-    echo -e "${CYAN}-----  -------  -----  ------  -----  ---  --  ---  --------                                                                                                                                                                                                                                             -------   ------------    --------${NC}"
+    echo -e "${CYAN}Rule#  Packets  Bytes  Action  Proto  Opt  In  Out  Source IP          Destination     Comments${NC}"
+    echo -e "${CYAN}-----  -------  -----  ------  -----  ---  --  ---  ---------------   ------------    --------${NC}"
 
     # Skip the first two header lines and show the rest
     echo "$rules" | tail -n +3
-
-    echo -e "\n${BOLD}${GREEN}Column Explanations:${NC}"
-    echo -e "${GREEN}Rule# - Rule number in the chain${NC}"
-    echo -e "${GREEN}Packets - Number of packets that matched this rule${NC}"
-    echo -e "${GREEN}Bytes - Total bytes of traffic that matched this rule${NC}"
-    echo -e "${GREEN}Action - What happens to matching packets (DROP = blocked)$                                                                                                                                                                                                                                             {NC}"
-    echo -e "${GREEN}Proto - Protocol (all = any protocol)${NC}"
-    echo -e "${GREEN}Opt/In/Out - Network options and interfaces${NC}"
-    echo -e "${GREEN}Source IP - The IP address being blocked${NC}"
-    echo -e "${GREEN}Destination - Where packets would be going (0.0.0.0/0 = any                                                                                                                                                                                                                                             where)${NC}"
-
-    echo -e "\n${BOLD}${YELLOW}Raw iptables Rules:${NC}"
-    echo -e "${YELLOW}------------------------------------------${NC}"
-
-    # Show raw iptables-save output for the chain
-    iptables-save | grep -E "^-A $BANNED_CHAIN"
-
-    # Show all rules by individual IPs
-    echo -e "\n${BOLD}${YELLOW}Rules Grouped by IP Address:${NC}"
-    echo -e "${YELLOW}------------------------------------------${NC}"
-
-    banned_ips=$(iptables -L "$BANNED_CHAIN" -n | grep DROP | grep -E '[0-9]+\.[                                                                                                                                                                                                                                             0-9]+\.[0-9]+\.[0-9]+' | awk '{print $4}' | sort | uniq)
-
-    if [ -n "$banned_ips" ]; then
-        while IFS= read -r ip; do
-            echo -e "\n${BOLD}${CYAN}IP: $ip${NC}"
-            echo -e "${YELLOW}----------------${NC}"
-            iptables -L "$BANNED_CHAIN" -n -v --line-numbers | grep "$ip"
-        done <<< "$banned_ips"
-    fi
-
-    echo
-    log_info "End of debug information"
 
     display_footer
 }
@@ -315,7 +270,7 @@ unban_ip() {
     ensure_banned_chain
 
     # Get banned IPs from BANNED_IPS chain
-    banned_ips=$(iptables -L "$BANNED_CHAIN" -n | grep DROP | grep -E '[0-9]+\.[                                                                                                                                                                                                                                             0-9]+\.[0-9]+\.[0-9]+' | awk '{print $4}' | sort | uniq)
+    banned_ips=$(iptables -L "$BANNED_CHAIN" -n | grep DROP | grep -E '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | awk '{print $4}' | sort | uniq)
 
     if [ -z "$banned_ips" ]; then
         log_info "No banned IPs found to unban"
@@ -331,10 +286,10 @@ unban_ip() {
     echo -e "${YELLOW}------------------------------------------${NC}"
     for i in "${!ip_array[@]}"; do
         ip="${ip_array[$i]}"
-        comment=$(iptables -L "$BANNED_CHAIN" -n | grep "$ip" | grep -o "\/\*.*\                                                                                                                                                                                                                                             *\/" | sed 's/\/\*//;s/\*\///' | head -n 1)
+        comment=$(iptables -L "$BANNED_CHAIN" -n | grep "$ip" | grep -o "\/\*.*\*\/" | sed 's/\/\*//;s/\*\///' | head -n 1)
 
         if [ -n "$comment" ]; then
-            echo -e "${GREEN}$((i+1))${NC}) ${YELLOW}$ip${NC} ${PURPLE}($comment                                                                                                                                                                                                                                             )${NC}"
+            echo -e "${GREEN}$((i+1))${NC}) ${YELLOW}$ip${NC} ${PURPLE}($comment)${NC}"
         else
             echo -e "${GREEN}$((i+1))${NC}) ${YELLOW}$ip${NC}"
         fi
@@ -343,7 +298,7 @@ unban_ip() {
     echo -e "\n${GREEN}0${NC}) Cancel"
     echo
 
-    echo -e "${CYAN}Enter the number of the IP to unban [0-${#ip_array[@]}]:${NC                                                                                                                                                                                                                                             } "
+    echo -e "${CYAN}Enter the number of the IP to unban [0-${#ip_array[@]}]:${NC} "
     read -r selection
 
     # Validate selection
@@ -360,7 +315,7 @@ unban_ip() {
     fi
 
     if [ "$selection" -gt "${#ip_array[@]}" ] || [ "$selection" -lt 1 ]; then
-        log_error "Invalid selection. Please choose a number between 1 and ${#ip                                                                                                                                                                                                                                             _array[@]}."
+        log_error "Invalid selection. Please choose a number between 1 and ${#ip_array[@]}."
         display_footer
         return 1
     fi
@@ -374,7 +329,7 @@ unban_ip() {
     local count=0
 
     # Get rule numbers in reverse order (to delete safely)
-    rule_nums=$(iptables -L "$BANNED_CHAIN" --line-numbers -n | grep -E "\s+$sel                                                                                                                                                                                                                                             ected_ip\s+" | awk '{print $1}' | sort -nr)
+    rule_nums=$(iptables -L "$BANNED_CHAIN" --line-numbers -n | grep -E "\s+$selected_ip\s+" | awk '{print $1}' | sort -nr)
 
     if [ -n "$rule_nums" ]; then
         while IFS= read -r num; do
@@ -385,12 +340,6 @@ unban_ip() {
 
     if [ $count -gt 0 ]; then
         log_info "Successfully removed $count rules for IP: $selected_ip"
-
-        # Remove from configuration file
-        sed -i "\|^$selected_ip|d" "$CONFIG_DIR/banned_ips.conf"
-
-        # Save rules
-        save_rules
     else
         log_warn "No rules were found for IP: $selected_ip"
     fi
@@ -415,13 +364,7 @@ clear_all_bans() {
     log_info "Flushing all bans from $BANNED_CHAIN chain..."
     iptables -F "$BANNED_CHAIN"
 
-    # Clear the config file
-    > "$CONFIG_DIR/banned_ips.conf"
-
     log_info "All bans have been removed"
-
-    # Save the changes
-    save_rules
 
     display_footer
 }
@@ -453,60 +396,19 @@ show_menu() {
     echo -e "${GREEN}2)${NC} Unban an IP address"
     echo -e "${GREEN}3)${NC} List banned IPs"
     echo -e "${GREEN}4)${NC} Clear all bans"
-    echo -e "${GREEN}5)${NC} Check iptables-persistent status"
-    echo -e "${GREEN}6)${NC} Debug banned IP rules (detailed view)"
-    echo -e "${GREEN}7)${NC} Exit"
+    echo -e "${GREEN}5)${NC} Debug banned IP rules (detailed view)"
+    echo -e "${GREEN}6)${NC} Exit"
     echo
-    echo -n -e "${CYAN}Enter option [1-7]:${NC} "
-}
-
-# Check iptables-persistent status
-check_persistence() {
-    display_header
-    echo -e "${BOLD}${CYAN}=== IPTables Persistence Status ===${NC}\n"
-
-    if dpkg -l iptables-persistent 2>/dev/null | grep -q "^ii"; then
-        log_info "iptables-persistent is installed"
-        log_info "Your iptables rules will persist across system reboots"
-    else
-        log_warn "iptables-persistent is NOT installed"
-        log_warn "Your iptables rules will be lost when the system reboots"
-
-        if prompt_yes_no "Would you like to install iptables-persistent now?"; t                                                                                                                                                                                                                                             hen
-            log_info "Installing iptables-persistent..."
-            DEBIAN_FRONTEND=noninteractive apt-get update -qq
-            DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persisten                                                                                                                                                                                                                                             t
-
-            if [ $? -eq 0 ]; then
-                log_info "iptables-persistent installed successfully"
-                netfilter-persistent save
-            else
-                log_error "Failed to install iptables-persistent"
-            fi
-        fi
-    fi
-
-    display_footer
+    echo -n -e "${CYAN}Enter option [1-6]:${NC} "
 }
 
 # Main script execution
 main() {
-    # Ensure config directory exists
-    ensure_config_dir || {
-        log_error "Failed to create configuration directory"
-    }
-
     # Ensure banned chain exists
-    ensure_banned_chain || {
-        log_error "Failed to setup iptables chain"
-    }
+    ensure_banned_chain
 
     # Initial message
     log_info "IP Ban Manager started successfully"
-
-    # Trap errors to prevent script exit
-    trap - ERR
-    set +e
 
     # Main menu loop
     while true; do
@@ -518,9 +420,8 @@ main() {
             2) unban_ip ;;
             3) list_bans ;;
             4) clear_all_bans ;;
-            5) check_persistence ;;
-            6) debug_banned_ips ;;
-            7)
+            5) debug_banned_ips ;;
+            6)
                 echo -e "${GREEN}Exiting...${NC}"
                 exit 0
                 ;;
