@@ -7,7 +7,8 @@
 
 # Configuration
 BANNED_CHAIN="BANNED_IPS"
-VERSION="1.2"
+VERSION="1.4"
+RULES_FILE="/etc/wireguard/banned_ips.txt"
 
 # Colors for output
 RED='\033[0;31m'
@@ -45,6 +46,31 @@ prompt_yes_no() {
             * ) log_error "Please answer yes or no.";;
         esac
     done
+}
+
+# Save banned IPs to simple text file (NOT iptables-save format)
+save_rules() {
+    log_info "Saving banned IPs to $RULES_FILE..."
+
+    # Make sure the directory exists
+    mkdir -p $(dirname "$RULES_FILE")
+
+    # Clear the file first
+    > "$RULES_FILE"
+
+    # Extract each banned IP and its comment and save to file
+    iptables -L "$BANNED_CHAIN" -n | grep DROP | while read -r line; do
+        ip=$(echo "$line" | awk '{print $4}')
+        comment=$(echo "$line" | grep -o "\/\*.*\*\/" | sed 's/\/\*//;s/\*\///')
+
+        if [ -n "$comment" ]; then
+            echo "$ip|$comment" >> "$RULES_FILE"
+        else
+            echo "$ip" >> "$RULES_FILE"
+        fi
+    done
+
+    log_info "Banned IPs saved successfully"
 }
 
 # Function to validate IPv4 address
@@ -91,8 +117,16 @@ ensure_banned_chain() {
     if ! iptables -L "$BANNED_CHAIN" &>/dev/null; then
         log_info "Creating $BANNED_CHAIN chain..."
         iptables -N "$BANNED_CHAIN"
-        iptables -I INPUT 1 -j "$BANNED_CHAIN"
-        iptables -I FORWARD 1 -j "$BANNED_CHAIN"
+
+        # Check if chain exists in INPUT and FORWARD
+        if ! iptables -C INPUT -j "$BANNED_CHAIN" 2>/dev/null; then
+            iptables -I INPUT 1 -j "$BANNED_CHAIN"
+        fi
+
+        if ! iptables -C FORWARD -j "$BANNED_CHAIN" 2>/dev/null; then
+            iptables -I FORWARD 1 -j "$BANNED_CHAIN"
+        fi
+
         log_info "$BANNED_CHAIN chain created and linked to INPUT and FORWARD chains"
     fi
 }
@@ -177,6 +211,9 @@ ban_ip() {
                 iptables -A "$BANNED_CHAIN" -s "$ip_to_ban" -j DROP
                 log_info "Removed ban reason for IP: $ip_to_ban"
             fi
+
+            # Save changes
+            save_rules
         fi
     else
         # Get optional comment
@@ -192,6 +229,9 @@ ban_ip() {
             iptables -A "$BANNED_CHAIN" -s "$ip_to_ban" -j DROP
         fi
         log_info "Added ban for IP: $ip_to_ban"
+
+        # Save changes
+        save_rules
     fi
 
     display_footer
@@ -340,6 +380,9 @@ unban_ip() {
 
     if [ $count -gt 0 ]; then
         log_info "Successfully removed $count rules for IP: $selected_ip"
+
+        # Save changes
+        save_rules
     else
         log_warn "No rules were found for IP: $selected_ip"
     fi
@@ -363,6 +406,9 @@ clear_all_bans() {
 
     log_info "Flushing all bans from $BANNED_CHAIN chain..."
     iptables -F "$BANNED_CHAIN"
+
+    # Save changes
+    save_rules
 
     log_info "All bans have been removed"
 

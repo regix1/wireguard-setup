@@ -3,6 +3,8 @@
 # WireGuard Rules Manager with Optimized Chain Handling
 
 LOCK_FILE="/var/run/wg-rules.lock"
+BANNED_IPS_FILE="/etc/wireguard/banned_ips.txt"
+BANNED_CHAIN="BANNED_IPS"
 
 # Check if rules already applied
 if [ -f "$LOCK_FILE" ]; then
@@ -25,17 +27,43 @@ iptables -P OUTPUT ACCEPT
 # Enable IP forwarding
 sysctl -w net.ipv4.conf.all.forwarding=1 >/dev/null
 
-# Optimize BANNED_IPS chain handling
+# Create BANNED_IPS chain if it doesn't exist
 if ! iptables -S | grep -q "^-N BANNED_IPS"; then
   echo "Creating BANNED_IPS chain..."
   iptables -N BANNED_IPS
 fi
 
-# Make sure the references are in place
+# Remove old references to BANNED_IPS and add them back as first rules
 iptables -D INPUT -j BANNED_IPS 2>/dev/null || true
 iptables -D FORWARD -j BANNED_IPS 2>/dev/null || true
 iptables -I INPUT 1 -j BANNED_IPS
 iptables -I FORWARD 1 -j BANNED_IPS
+
+# Clear existing chains except the banned chain content
+iptables -F INPUT
+iptables -F FORWARD
+# Add BANNED_IPS references back immediately
+iptables -I INPUT 1 -j BANNED_IPS
+iptables -I FORWARD 1 -j BANNED_IPS
+
+# Clear NAT tables
+iptables -t nat -F
+iptables -F BANNED_IPS
+
+# Restore banned IPs from file
+if [ -f "$BANNED_IPS_FILE" ]; then
+  echo "Restoring banned IPs from $BANNED_IPS_FILE"
+  while IFS= read -r line; do
+    if [[ "$line" == *"|"* ]]; then
+      ip=$(echo "$line" | cut -d'|' -f1)
+      comment=$(echo "$line" | cut -d'|' -f2)
+      iptables -A BANNED_IPS -s "$ip" -m comment --comment "$comment" -j DROP
+    else
+      iptables -A BANNED_IPS -s "$line" -j DROP
+    fi
+  done < "$BANNED_IPS_FILE"
+  echo "Banned IPs restored successfully"
+fi
 
 echo "WireGuard firewall rules applied successfully."
 
